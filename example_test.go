@@ -22,7 +22,7 @@ import (
 	"math/rand"
 	"strings"
 
-	"github.com/infosecual/gofuzz"
+	"github.com/google/gofuzz"
 )
 
 func ExampleSimple() {

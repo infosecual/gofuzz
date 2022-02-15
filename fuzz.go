@@ -25,7 +25,7 @@ import (
 	"time"
 	"unsafe"
 
-	"github.com/infosecual/gofuzz/bytesource"
+	"github.com/google/gofuzz/bytesource"
 	"strings"
 )
 
@@ -70,6 +70,12 @@ func NewWithSeed(seed int64) *Fuzzer {
 	return f
 }
 
+func (f *Fuzzer) IsDataFinished() bool {
+	if f.r.Failed == 0 {
+		return true
+	}
+	return false
+}
 // NewFromGoFuzz is a helper function that enables using gofuzz (this
 // project) with go-fuzz (https://github.com/dvyukov/go-fuzz) for continuous
 // fuzzing. Essentially, it enables translating the fuzzing bytes from

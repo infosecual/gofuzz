@@ -37,8 +37,8 @@ type ByteSource struct {
 // New returns a new ByteSource from a given slice of bytes.
 func New(input []byte) *ByteSource {
 	s := &ByteSource{
-		Reader:   bytes.NewReader(input),
-		Failed:   int(0),
+		Reader: bytes.NewReader(input),
+		Failed: int(0),
 		//fallback: rand.NewSource(0),
 	}
 	//if len(input) > 0 {
@@ -52,7 +52,7 @@ func (s *ByteSource) Uint64() uint64 {
 	if s.Len() > 0 {
 		return s.consumeUint64()
 	}
-        s.Failed = int(1)
+	s.Failed = int(1)
 	return uint64(0)
 	// Input was exhausted, return random number from fallback (in this case fallback should not be
 	// nil). Try first having a Uint64 output (Should work in current rand implementation),

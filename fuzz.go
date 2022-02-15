@@ -25,9 +25,139 @@ import (
 	"time"
 	"unsafe"
 
-	"github.com/google/gofuzz/bytesource"
 	"strings"
+
+	"github.com/google/gofuzz/bytesource"
 )
+
+// A Source represents a source of uniformly-distributed
+// pseudo-random int64 values in the range [0, 1<<63).
+type RandProxySource interface {
+	Int63() int64
+	Seed(seed int64)
+}
+
+type RandProxySource64 interface {
+	RandProxySource
+	Uint64() uint64
+}
+
+// A Rand is a source of random numbers.
+type RandProxy struct {
+	src    RandProxySource
+	s64    RandProxySource64 // non-nil if src is source64
+	Failed bool
+
+	// readVal contains remainder of 63-bit integer used for bytes
+	// generation during most recent Read call.
+	// It is saved so next Read call can start where the previous
+	// one finished.
+	readVal int64
+	// readPos indicates the number of low-order bytes of readVal
+	// that are still valid.
+	readPos int8
+}
+
+// New returns a new Rand that uses random values from src
+// to generate other random values.
+func NewRandProxy(src RandProxySource) *RandProxy {
+	s64, _ := src.(RandProxySource64)
+	return &RandProxy{src: src, s64: s64, Failed: false}
+}
+
+// Intn returns, as an int, a non-negative pseudo-random number in the half-open interval [0,n).
+// It panics if n <= 0.
+func (r *RandProxy) Intn(n int) int {
+	if n <= 0 {
+		panic("invalid argument to Intn")
+	}
+	if n <= 1<<31-1 {
+		return int(r.Int31n(int32(n)))
+	}
+	return int(r.Int63n(int64(n)))
+}
+
+// Int63n returns, as an int64, a non-negative pseudo-random number in the half-open interval [0,n).
+// It panics if n <= 0.
+func (r *RandProxy) Int63n(n int64) int64 {
+	if n <= 0 {
+		panic("invalid argument to Int63n")
+	}
+	if n&(n-1) == 0 { // n is power of two, can mask
+		return r.Int63() & (n - 1)
+	}
+	max := int64((1 << 63) - 1 - (1<<63)%uint64(n))
+	v := r.Int63()
+	for v > max {
+		v = r.Int63()
+	}
+	return v % n
+}
+
+// Int63 returns a non-negative pseudo-random 63-bit integer as an int64.
+func (r *RandProxy) Int63() int64 { return r.src.Int63() }
+
+// Int31 returns a non-negative pseudo-random 31-bit integer as an int32.
+func (r *RandProxy) Int31() int32 { return int32(r.Int63() >> 32) }
+
+// Float64 returns, as a float64, a pseudo-random number in the half-open interval [0.0,1.0).
+func (r *RandProxy) Float64() float64 {
+	// A clearer, simpler implementation would be:
+	//	return float64(r.Int63n(1<<53)) / (1<<53)
+	// However, Go 1 shipped with
+	//	return float64(r.Int63()) / (1 << 63)
+	// and we want to preserve that value stream.
+	//
+	// There is one bug in the value stream: r.Int63() may be so close
+	// to 1<<63 that the division rounds up to 1.0, and we've guaranteed
+	// that the result is always less than 1.0.
+	//
+	// We tried to fix this by mapping 1.0 back to 0.0, but since float64
+	// values near 0 are much denser than near 1, mapping 1 to 0 caused
+	// a theoretically significant overshoot in the probability of returning 0.
+	// Instead of that, if we round up to 1, just try again.
+	// Getting 1 only happens 1/2⁵³ of the time, so most clients
+	// will not observe it anyway.
+again:
+	f := float64(r.Int63()) / (1 << 63)
+	if f == 1 {
+		goto again // resample; this branch is taken O(never)
+	}
+	return f
+}
+
+// Int31n returns, as an int32, a non-negative pseudo-random number in the half-open interval [0,n).
+// It panics if n <= 0.
+func (r *RandProxy) Int31n(n int32) int32 {
+	if n <= 0 {
+		panic("invalid argument to Int31n")
+	}
+	if n&(n-1) == 0 { // n is power of two, can mask
+		return r.Int31() & (n - 1)
+	}
+	max := int32((1 << 31) - 1 - (1<<31)%uint32(n))
+	v := r.Int31()
+	for v > max {
+		v = r.Int31()
+	}
+	return v % n
+}
+
+// Float32 returns, as a float32, a pseudo-random number in the half-open interval [0.0,1.0).
+func (r *RandProxy) Float32() float32 {
+	// Same rationale as in Float64: we want to preserve the Go 1 value
+	// stream except we want to fix it not to return 1.0
+	// This only happens 1/2²⁴ of the time (plus the 1/2⁵³ of the time in Float64).
+again:
+	f := float32(r.Float64())
+	if f == 1 {
+		goto again // resample; this branch is taken O(very rarely)
+	}
+	return f
+}
+
+// Uint32 returns a pseudo-random 32-bit value as a uint32.
+func (r *RandProxy) Uint32() uint32 { return uint32(r.Int63() >> 31) }
 
 // fuzzFuncMap is a map from a type to a fuzzFunc that handles that type.
 type fuzzFuncMap map[reflect.Type]reflect.Value
@@ -36,7 +166,7 @@ type fuzzFuncMap map[reflect.Type]reflect.Value
 type Fuzzer struct {
 	fuzzFuncs             fuzzFuncMap
 	defaultFuzzFuncs      fuzzFuncMap
-	r                     *rand.Rand
+	r                     *RandProxy
 	nilChance             float64
 	minElements           int
 	maxElements           int
@@ -60,7 +190,7 @@ func NewWithSeed(seed int64) *Fuzzer {
 		},
 
 		fuzzFuncs:             fuzzFuncMap{},
-		r:                     rand.New(rand.NewSource(seed)),
+		r:                     NewRandProxy(rand.NewSource(seed)),
 		nilChance:             .2,
 		minElements:           1,
 		maxElements:           10,
@@ -71,11 +201,12 @@ func NewWithSeed(seed int64) *Fuzzer {
 }
 
 func (f *Fuzzer) IsDataFinished() bool {
-	if f.r.Failed == 0 {
+	if f.r.Failed == true {
 		return true
 	}
 	return false
 }
+
 // NewFromGoFuzz is a helper function that enables using gofuzz (this
 // project) with go-fuzz (https://github.com/dvyukov/go-fuzz) for continuous
 // fuzzing. Essentially, it enables translating the fuzzing bytes from
@@ -148,7 +279,7 @@ func (f *Fuzzer) Funcs(fuzzFuncs ...interface{}) *Fuzzer {
 // RandSource causes f to get values from the given source of randomness.
 // Use if you want deterministic fuzzing.
 func (f *Fuzzer) RandSource(s rand.Source) *Fuzzer {
-	f.r = rand.New(s)
+	f.r = NewRandProxy(s)
 	return f
 }
 
@@ -376,7 +507,7 @@ func (fc *fuzzerContext) tryCustom(v reflect.Value) bool {
 		if v.CanInterface() {
 			intf := v.Interface()
 			if fuzzable, ok := intf.(Interface); ok {
-				fuzzable.Fuzz(Continue{fc: fc, Rand: fc.fuzzer.r})
+				fuzzable.Fuzz(Continue{fc: fc, RandProxy: fc.fuzzer.r})
 				return true
 			}
 		}
@@ -408,7 +539,7 @@ func (fc *fuzzerContext) tryCustom(v reflect.Value) bool {
 
 	doCustom.Call([]reflect.Value{v, reflect.ValueOf(Continue{
 		fc:   fc,
-		Rand: fc.fuzzer.r,
+		RandProxy: fc.fuzzer.r,
 	})})
 	return true
 }
@@ -428,7 +559,7 @@ type Continue struct {
 	// For convenience, Continue implements rand.Rand via embedding.
 	// Use this for generating any randomness if you want your fuzzing
 	// to be repeatable for a given seed.
-	*rand.Rand
+	*RandProxy
 }
 
 // Fuzz continues fuzzing obj. obj must be a pointer or a reflect.Value of a
@@ -464,25 +595,25 @@ func (c Continue) FuzzNoCustom(obj interface{}) {
 // RandString makes a random string up to 20 characters long. The returned string
 // may include a variety of (valid) UTF-8 encodings.
 func (c Continue) RandString() string {
-	return randString(c.Rand)
+	return randString(c.RandProxy)
 }
 
 // RandUint64 makes random 64 bit numbers.
 // Weirdly, rand doesn't have a function that gives you 64 random bits.
 func (c Continue) RandUint64() uint64 {
-	return randUint64(c.Rand)
+	return randUint64(c.RandProxy)
 }
 
 // RandBool returns true or false randomly.
 func (c Continue) RandBool() bool {
-	return randBool(c.Rand)
+	return randBool(c.RandProxy)
 }
 
-func fuzzInt(v reflect.Value, r *rand.Rand) {
+func fuzzInt(v reflect.Value, r *RandProxy) {
 	v.SetInt(int64(randUint64(r)))
 }
 
-func fuzzUint(v reflect.Value, r *rand.Rand) {
+func fuzzUint(v reflect.Value, r *RandProxy) {
 	v.SetUint(randUint64(r))
 }
 
@@ -490,13 +621,13 @@ func fuzzTime(t *time.Time, c Continue) {
 	var sec, nsec int64
 	// Allow for about 1000 years of random time values, which keeps things
 	// like JSON parsing reasonably happy.
-	sec = c.Rand.Int63n(1000 * 365 * 24 * 60 * 60)
+	sec = c.RandProxy.Int63n(1000 * 365 * 24 * 60 * 60)
 	c.Fuzz(&nsec)
 	*t = time.Unix(sec, nsec)
 }
 
-var fillFuncMap = map[reflect.Kind]func(reflect.Value, *rand.Rand){
-	reflect.Bool: func(v reflect.Value, r *rand.Rand) {
+var fillFuncMap = map[reflect.Kind]func(reflect.Value, *RandProxy){
+	reflect.Bool: func(v reflect.Value, r *RandProxy) {
 		v.SetBool(randBool(r))
 	},
 	reflect.Int:     fuzzInt,
@@ -510,28 +641,28 @@ var fillFuncMap = map[reflect.Kind]func(reflect.Value, *rand.Rand){
 	reflect.Uint32:  fuzzUint,
 	reflect.Uint64:  fuzzUint,
 	reflect.Uintptr: fuzzUint,
-	reflect.Float32: func(v reflect.Value, r *rand.Rand) {
+	reflect.Float32: func(v reflect.Value, r *RandProxy) {
 		v.SetFloat(float64(r.Float32()))
 	},
-	reflect.Float64: func(v reflect.Value, r *rand.Rand) {
+	reflect.Float64: func(v reflect.Value, r *RandProxy) {
 		v.SetFloat(r.Float64())
 	},
-	reflect.Complex64: func(v reflect.Value, r *rand.Rand) {
+	reflect.Complex64: func(v reflect.Value, r *RandProxy) {
 		v.SetComplex(complex128(complex(r.Float32(), r.Float32())))
 	},
-	reflect.Complex128: func(v reflect.Value, r *rand.Rand) {
+	reflect.Complex128: func(v reflect.Value, r *RandProxy) {
 		v.SetComplex(complex(r.Float64(), r.Float64()))
 	},
-	reflect.String: func(v reflect.Value, r *rand.Rand) {
+	reflect.String: func(v reflect.Value, r *RandProxy) {
 		v.SetString(randString(r))
 	},
-	reflect.UnsafePointer: func(v reflect.Value, r *rand.Rand) {
+	reflect.UnsafePointer: func(v reflect.Value, r *RandProxy) {
 		panic("unimplemented")
 	},
 }
 
 // randBool returns true or false randomly.
-func randBool(r *rand.Rand) bool {
+func randBool(r *RandProxy) bool {
 	return r.Int31()&(1<<30) == 0
 }
 
@@ -563,7 +694,7 @@ func (ur UnicodeRange) choose(r int63nPicker) rune {
 func (ur UnicodeRange) CustomStringFuzzFunc() func(s *string, c Continue) {
 	ur.check()
 	return func(s *string, c Continue) {
-		*s = ur.randString(c.Rand)
+		*s = ur.randString(c.RandProxy)
 	}
 }
 
@@ -577,7 +708,7 @@ func (ur UnicodeRange) check() {
 
 // randString of UnicodeRange makes a random string up to 20 characters long.
 // Each character is selected form ur(UnicodeRange).
-func (ur UnicodeRange) randString(r *rand.Rand) string {
+func (ur UnicodeRange) randString(r *RandProxy) string {
 	n := r.Intn(20)
 	sb := strings.Builder{}
 	sb.Grow(n)
@@ -610,14 +741,14 @@ func (ur UnicodeRanges) CustomStringFuzzFunc() func(s *string, c Continue) {
 		ur[i].check()
 	}
 	return func(s *string, c Continue) {
-		*s = ur.randString(c.Rand)
+		*s = ur.randString(c.RandProxy)
 	}
 }
 
 // randString of UnicodeRanges makes a random string up to 20 characters long.
 // Each character is selected form one of the ranges of ur(UnicodeRanges),
 // and each range has an equal probability of being chosen.
-func (ur UnicodeRanges) randString(r *rand.Rand) string {
+func (ur UnicodeRanges) randString(r *RandProxy) string {
 	n := r.Intn(20)
 	sb := strings.Builder{}
 	sb.Grow(n)
@@ -629,12 +760,12 @@ func (ur UnicodeRanges) randString(r *rand.Rand) string {
 
 // randString makes a random string up to 20 characters long. The returned string
 // may include a variety of (valid) UTF-8 encodings.
-func randString(r *rand.Rand) string {
+func randString(r *RandProxy) string {
 	return defaultUnicodeRanges.randString(r)
 }
 
 // randUint64 makes random 64 bit numbers.
 // Weirdly, rand doesn't have a function that gives you 64 random bits.
-func randUint64(r *rand.Rand) uint64 {
+func randUint64(r *RandProxy) uint64 {
 	return uint64(r.Uint32())<<32 | uint64(r.Uint32())
 }

@@ -30,22 +30,26 @@ import (
 // It also exposes a `bytes.Reader` API, which lets callers consume the bytes directly.
 type ByteSource struct {
 	*bytes.Reader
-	Failed bool
+	out_of_bytes bool
 	//fallback rand.Source
 }
 
 // New returns a new ByteSource from a given slice of bytes.
 func New(input []byte) *ByteSource {
 	s := &ByteSource{
-		Reader: bytes.NewReader(input),
-		Failed: false,
+		Reader:       bytes.NewReader(input),
+		out_of_bytes: false,
 		//fallback: rand.NewSource(0),
 	}
 	if len(input) > 0 {
-		s.Failed = true
+		s.out_of_bytes = true
 		//s.fallback = rand.NewSource(int64(s.consumeUint64()))
 	}
 	return s
+}
+
+func (s *ByteSource) Failed() bool {
+	return s.out_of_bytes
 }
 
 func (s *ByteSource) Uint64() uint64 {
@@ -53,7 +57,7 @@ func (s *ByteSource) Uint64() uint64 {
 	if s.Len() > 0 {
 		return s.consumeUint64()
 	}
-	s.Failed = true
+	s.out_of_bytes = true
 	return uint64(0)
 	// Input was exhausted, return random number from fallback (in this case fallback should not be
 	// nil). Try first having a Uint64 output (Should work in current rand implementation),
@@ -71,7 +75,6 @@ func (s *ByteSource) Int63() int64 {
 func (s *ByteSource) Seed(seed int64) {
 	//s.fallback = rand.NewSource(seed)
 	s.Reader = bytes.NewReader(nil)
-	s.Failed = false
 }
 
 // consumeUint64 reads 8 bytes from the input and convert them to a uint64. It assumes that the the

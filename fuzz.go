@@ -35,6 +35,7 @@ import (
 type RandProxySource interface {
 	Int63() int64
 	Seed(seed int64)
+	Failed() bool
 }
 
 type RandProxySource64 interface {
@@ -46,7 +47,6 @@ type RandProxySource64 interface {
 type RandProxy struct {
 	src    RandProxySource
 	s64    RandProxySource64 // non-nil if src is source64
-	Failed bool
 
 	// readVal contains remainder of 63-bit integer used for bytes
 	// generation during most recent Read call.
@@ -62,7 +62,7 @@ type RandProxy struct {
 // to generate other random values.
 func NewRandProxy(src RandProxySource) *RandProxy {
 	s64, _ := src.(RandProxySource64)
-	return &RandProxy{src: src, s64: s64, Failed: false}
+	return &RandProxy{src: src, s64: s64}
 }
 
 // Intn returns, as an int, a non-negative pseudo-random number in the half-open interval [0,n).
@@ -184,13 +184,14 @@ func New() *Fuzzer {
 }
 
 func NewWithSeed(seed int64) *Fuzzer {
+	dummy_data := []byte{0, 0, 0, 0}
 	f := &Fuzzer{
 		defaultFuzzFuncs: fuzzFuncMap{
 			reflect.TypeOf(&time.Time{}): reflect.ValueOf(fuzzTime),
 		},
 
 		fuzzFuncs:             fuzzFuncMap{},
-		r:                     NewRandProxy(rand.NewSource(seed)),
+		r:                     NewRandProxy(bytesource.New(dummy_data)),
 		nilChance:             .2,
 		minElements:           1,
 		maxElements:           10,
@@ -201,7 +202,7 @@ func NewWithSeed(seed int64) *Fuzzer {
 }
 
 func (f *Fuzzer) IsDataFinished() bool {
-	if f.r.Failed == true {
+	if f.r.src.Failed() == true {
 		return true
 	}
 	return false
@@ -278,7 +279,7 @@ func (f *Fuzzer) Funcs(fuzzFuncs ...interface{}) *Fuzzer {
 
 // RandSource causes f to get values from the given source of randomness.
 // Use if you want deterministic fuzzing.
-func (f *Fuzzer) RandSource(s rand.Source) *Fuzzer {
+func (f *Fuzzer) RandSource(s RandProxySource) *Fuzzer {
 	f.r = NewRandProxy(s)
 	return f
 }

@@ -560,6 +560,7 @@ type Continue struct {
 	// Use this for generating any randomness if you want your fuzzing
 	// to be repeatable for a given seed.
 	*RandProxy
+	*rand.Rand
 }
 
 // Fuzz continues fuzzing obj. obj must be a pointer or a reflect.Value of a
